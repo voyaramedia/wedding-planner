@@ -1,0 +1,6 @@
+{
+  "name": "Our Wedding Planner",
+  "description": "A luxury, Pinterest-inspired engagement and wedding planning platform with role-based collaboration, live countdowns, budget and expense tracking, guest list invitations, vendor directory, task checklists, and couple memories.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
