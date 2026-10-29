@@ -84,9 +84,11 @@ export interface BudgetConfig {
   engagementBudget: number;
   weddingBudget: number;
   combinedBudget: number;
-  groomBudget?: number;
-  brideBudget?: number;
+  groomBudget: number;
+  brideBudget: number;
   categoryBudgets: Record<string, number>;
+  groomCategoryBudgets?: Record<string, number>;
+  brideCategoryBudgets?: Record<string, number>;
 }
 
 export type PaymentStatus = 'pending' | 'partially_paid' | 'paid';
@@ -112,6 +114,7 @@ export interface Expense {
   owner?: RecordOwner;
   createdBy: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
@@ -200,10 +203,26 @@ export interface Vendor {
 
 export type GuestSide = 'groom' | 'bride' | 'mutual';
 export type RSVPStatus = 'attending' | 'declined' | 'pending' | 'tentative';
+export type InvitationType = 'engagement' | 'wedding' | 'reception' | 'other';
+
+export interface GuestInvitationRecord {
+  id: string;
+  invitationType: InvitationType;
+  customFunctionName?: string;
+  recipientName: string;
+  recipientContact: string;
+  channel: 'whatsapp' | 'email' | 'digital';
+  message: string;
+  sentBySide: 'bride' | 'groom';
+  sentByName: string;
+  sentAt: string;
+  status: 'sent' | 'delivered' | 'failed';
+}
 
 export interface Guest {
   id: string;
   weddingId?: string;
+  srNo?: number;
   name: string;
   side: GuestSide;
   relation?: string;
@@ -213,6 +232,8 @@ export interface Guest {
   rsvpStatus: RSVPStatus;
   dietary?: string;
   eventsInvited: string[];
+  invitationType?: InvitationType;
+  customFunctionName?: string;
   invitationSent: boolean;
   invitationSentAt?: string;
   invitationSentBy?: string;
@@ -220,6 +241,16 @@ export interface Guest {
   invitationCardId?: string;
   notes?: string;
   owner?: RecordOwner;
+  createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+
+  // Shared Guest Deduplication & Attendance Group Synchronization
+  sharedGuestId?: string;
+  canonicalAttendanceGroupId?: string;
+  isConfirmedShared?: boolean;
+  matchedGuestId?: string;
+  invitationHistory?: GuestInvitationRecord[];
 }
 
 export interface SharedGuestStats {
@@ -244,6 +275,9 @@ export interface SharedGuestStats {
     declinedPax: number;
     invitationsSent: number;
   };
+  combinedEventPax: number;
+  uniqueGuestsCount: number;
+  duplicateGroupCount: number;
 }
 
 export interface InvitationCard {
@@ -266,18 +300,35 @@ export type GalleryCategory =
   | 'wedding'
   | 'pre-wedding'
   | 'reception'
+  | 'custom'
   | 'other';
+
+export interface PhotoAlbum {
+  id: string;
+  weddingId?: string;
+  name: string;
+  description?: string;
+  coverImageUrl?: string;
+  category: 'engagement' | 'wedding' | 'pre-wedding' | 'family' | 'reception' | 'custom';
+  owner: RecordOwner;
+  createdAt: string;
+  photoCount?: number;
+}
 
 export interface GalleryItem {
   id: string;
   weddingId?: string;
+  albumId?: string;
   title: string;
   imageUrl: string;
   category: GalleryCategory;
   date: string;
   caption?: string;
+  description?: string;
   owner?: RecordOwner;
   uploadedBy: string;
+  uploadedByName?: string;
+  createdAt?: string;
 }
 
 export interface ActivityLog {
@@ -303,6 +354,7 @@ export interface WeddingData {
   guests: Guest[];
   sharedGuestStats: SharedGuestStats;
   invitationCards: InvitationCard[];
+  albums: PhotoAlbum[];
   gallery: GalleryItem[];
   activityLogs: ActivityLog[];
 }

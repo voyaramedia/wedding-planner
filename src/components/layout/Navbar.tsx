@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Menu, Plus, Heart, Wallet, CheckSquare, Users, CalendarPlus } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { useWeddingData } from '../../context/WeddingDataContext.tsx';
+import { PWAInstallButton } from './PWAInstallButton.tsx';
 
 interface NavbarProps {
   onOpenMobileMenu: () => void;
@@ -60,6 +61,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenMobileMenu, onQuickAction 
 
         {/* Right Side: Quick Action Buttons & Profile */}
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+          <PWAInstallButton variant="nav" />
+
           {/* Desktop & Tablet buttons */}
           <div className="hidden md:flex items-center gap-2">
             <button

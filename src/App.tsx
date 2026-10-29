@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
 import { WeddingDataProvider, useWeddingData } from './context/WeddingDataContext.tsx';
+import { ToastProvider } from './context/ToastContext.tsx';
 import { Sidebar, ActivePage } from './components/layout/Sidebar.tsx';
 import { Navbar } from './components/layout/Navbar.tsx';
 import { MobileBottomNav } from './components/layout/MobileBottomNav.tsx';
@@ -424,10 +425,12 @@ function MainApp() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <WeddingDataProvider>
-        <MainApp />
-      </WeddingDataProvider>
-    </AuthProvider>
+    <ToastProvider>
+      <AuthProvider>
+        <WeddingDataProvider>
+          <MainApp />
+        </WeddingDataProvider>
+      </AuthProvider>
+    </ToastProvider>
   );
 }

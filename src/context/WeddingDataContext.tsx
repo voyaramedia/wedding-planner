@@ -12,6 +12,7 @@ import {
   Guest,
   InvitationCard,
   GalleryItem,
+  PhotoAlbum,
   SharedGuestStats,
 } from '../types/index.ts';
 import { api } from '../lib/api.ts';
@@ -29,8 +30,18 @@ interface BudgetMetrics {
   engagementSpent: number;
   weddingBudget: number;
   weddingSpent: number;
+  groomBudget: number;
   groomSpent: number;
+  groomPaid: number;
+  groomPending: number;
+  groomRemaining: number;
+  groomUtilization: number;
+  brideBudget: number;
   brideSpent: number;
+  bridePaid: number;
+  bridePending: number;
+  brideRemaining: number;
+  brideUtilization: number;
   sharedSpent: number;
 }
 
@@ -79,13 +90,21 @@ interface WeddingDataContextType {
   addGuest: (guest: Partial<Guest>) => Promise<Guest>;
   updateGuest: (id: string, updates: Partial<Guest>) => Promise<Guest>;
   deleteGuest: (id: string) => Promise<void>;
+  batchSaveGuests: (guests: Partial<Guest>[]) => Promise<{ added: number; updated: number }>;
+  matchSharedGuest: (guestId1: string, guestId2: string, action: 'link' | 'unlink') => Promise<void>;
   
   // Invitations
   uploadInvitationCard: (data: { title: string; imageUrl: string; event: string; messageTemplate?: string }) => Promise<InvitationCard>;
-  sendInvitations: (payload: { guestIds: string[]; invitationCardId?: string; channel?: string; customMessage?: string }) => Promise<{ success: boolean; sentCount: number; message: string }>;
+  sendInvitations: (payload: { guestIds: string[]; invitationCardId?: string; channel?: string; customMessage?: string; invitationType?: string; customFunctionName?: string }) => Promise<{ success: boolean; sentCount: number; message: string }>;
   
+  // Photo Albums
+  addAlbum: (album: { name: string; description?: string; category: string; coverImageUrl?: string; owner?: string }) => Promise<PhotoAlbum>;
+  updateAlbum: (id: string, updates: Partial<PhotoAlbum>) => Promise<PhotoAlbum>;
+  deleteAlbum: (id: string) => Promise<void>;
+
   // Gallery
-  addGalleryPhoto: (data: Partial<GalleryItem>) => Promise<GalleryItem>;
+  addGalleryPhoto: (photoData: Partial<GalleryItem>) => Promise<GalleryItem>;
+  batchUploadPhotos: (photos: Array<{ url: string; title: string; category?: string; albumId?: string; caption?: string; description?: string; owner?: string }>) => Promise<GalleryItem[]>;
   updateGalleryPhoto: (id: string, updates: Partial<GalleryItem>) => Promise<GalleryItem>;
   deleteGalleryPhoto: (id: string) => Promise<void>;
   adminDeletePhoto: (id: string) => Promise<void>;
@@ -180,15 +199,30 @@ export const WeddingDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setData(prev => {
       if (!prev) return null;
       const target = prev.events.find(e => e.id === id);
-      const isEng = id === 'evt_eng' || id === 'engagement' || target?.type === 'engagement';
-      const isWed = id === 'evt_wed' || id === 'wedding' || target?.type === 'wedding';
+      const remainingEvents = prev.events.filter(e => e.id !== id);
+      const remainingEng = remainingEvents.filter(e => e.type === 'engagement');
+      const remainingWed = remainingEvents.filter(e => e.type === 'wedding');
+
+      const shouldResetEng = (target?.type === 'engagement') && (id === 'evt_eng' || remainingEng.length === 0 || prev.coupleProfile.engagementDate === target.dateTime);
+      const shouldResetWed = (target?.type === 'wedding') && (id === 'evt_wed' || remainingWed.length === 0 || prev.coupleProfile.weddingDate === target.dateTime);
+
       return {
         ...prev,
-        events: prev.events.filter(e => e.id !== id),
+        events: remainingEvents,
         coupleProfile: {
           ...prev.coupleProfile,
-          ...(isEng ? { engagementDate: '', engagementVenue: '', engagementAddress: '', engagementMapLink: '' } : {}),
-          ...(isWed ? { weddingDate: '', weddingVenue: '', weddingAddress: '', weddingMapLink: '' } : {}),
+          ...(shouldResetEng ? {
+            engagementDate: remainingEng[0]?.dateTime || '',
+            engagementVenue: remainingEng[0]?.venue || '',
+            engagementAddress: remainingEng[0]?.address || '',
+            engagementMapLink: remainingEng[0]?.mapLink || '',
+          } : {}),
+          ...(shouldResetWed ? {
+            weddingDate: remainingWed[0]?.dateTime || '',
+            weddingVenue: remainingWed[0]?.venue || '',
+            weddingAddress: remainingWed[0]?.address || '',
+            weddingMapLink: remainingWed[0]?.mapLink || '',
+          } : {}),
         }
       };
     });
@@ -339,6 +373,17 @@ export const WeddingDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
     setData(prev => prev ? { ...prev, guests: prev.guests.filter(g => g.id !== id) } : null);
   };
 
+  const batchSaveGuests = async (guests: Partial<Guest>[]) => {
+    const res = await api.batchSaveGuests(guests);
+    await refreshData();
+    return { added: res.added, updated: res.updated };
+  };
+
+  const matchSharedGuest = async (guestId1: string, guestId2: string, action: 'link' | 'unlink') => {
+    await api.matchSharedGuest({ guestId1, guestId2, action });
+    await refreshData();
+  };
+
   // Invitations
   const uploadInvitationCard = async (cardData: { title: string; imageUrl: string; event: string; messageTemplate?: string }) => {
     const created = await api.uploadInvitationCard(cardData);
@@ -346,11 +391,29 @@ export const WeddingDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
     return created;
   };
 
-  const sendInvitations = async (payload: { guestIds: string[]; invitationCardId?: string; channel?: string; customMessage?: string }) => {
+  const sendInvitations = async (payload: { guestIds: string[]; invitationCardId?: string; channel?: string; customMessage?: string; invitationType?: string; customFunctionName?: string }) => {
     const res = await api.sendInvitations(payload);
     fireCelebrationConfetti();
     await refreshData();
     return res;
+  };
+
+  // Photo Albums
+  const addAlbum = async (albumData: { name: string; description?: string; category: string; coverImageUrl?: string; owner?: string }) => {
+    const created = await api.createAlbum(albumData);
+    setData(prev => prev ? { ...prev, albums: [...(prev.albums || []), created] } : null);
+    return created;
+  };
+
+  const updateAlbum = async (id: string, updates: Partial<PhotoAlbum>) => {
+    const updated = await api.updateAlbum(id, updates);
+    setData(prev => prev ? { ...prev, albums: (prev.albums || []).map(a => a.id === id ? updated : a) } : null);
+    return updated;
+  };
+
+  const deleteAlbum = async (id: string) => {
+    await api.deleteAlbum(id);
+    setData(prev => prev ? { ...prev, albums: (prev.albums || []).filter(a => a.id !== id) } : null);
   };
 
   // Gallery
@@ -358,6 +421,12 @@ export const WeddingDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const created = await api.addGalleryPhoto(photoData);
     setData(prev => prev ? { ...prev, gallery: [created, ...prev.gallery] } : null);
     return created;
+  };
+
+  const batchUploadPhotos = async (photos: Array<{ url: string; title: string; category?: string; albumId?: string; caption?: string; description?: string; owner?: string }>) => {
+    const res = await api.batchUploadPhotos(photos);
+    await refreshData();
+    return res.photos;
   };
 
   const updateGalleryPhoto = async (id: string, updates: Partial<GalleryItem>) => {
@@ -395,8 +464,24 @@ export const WeddingDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const weddingSpent = weddingExpenses.reduce((sum, e) => sum + (Number(e.actualAmount) || 0), 0);
   const weddingBudget = Number(budgetConfig?.weddingBudget) || 0;
 
-  const groomSpent = expenses.filter(e => e.owner === 'groom').reduce((sum, e) => sum + (Number(e.actualAmount) || 0), 0);
-  const brideSpent = expenses.filter(e => e.owner === 'bride').reduce((sum, e) => sum + (Number(e.actualAmount) || 0), 0);
+  // Groom Side Financials
+  const groomExpenses = expenses.filter(e => e.owner === 'groom');
+  const groomBudget = Number(budgetConfig?.groomBudget) || 0;
+  const groomSpent = groomExpenses.reduce((sum, e) => sum + (Number(e.actualAmount) || 0), 0);
+  const groomPaid = groomExpenses.reduce((sum, e) => sum + (Number(e.amountPaid) || 0), 0);
+  const groomPending = groomExpenses.reduce((sum, e) => sum + (Number(e.remainingAmount) || 0), 0);
+  const groomRemaining = Math.max(0, groomBudget - groomSpent);
+  const groomUtilization = groomBudget > 0 ? Math.min(100, Math.round((groomSpent / groomBudget) * 100)) : 0;
+
+  // Bride Side Financials
+  const brideExpenses = expenses.filter(e => e.owner === 'bride');
+  const brideBudget = Number(budgetConfig?.brideBudget) || 0;
+  const brideSpent = brideExpenses.reduce((sum, e) => sum + (Number(e.actualAmount) || 0), 0);
+  const bridePaid = brideExpenses.reduce((sum, e) => sum + (Number(e.amountPaid) || 0), 0);
+  const bridePending = brideExpenses.reduce((sum, e) => sum + (Number(e.remainingAmount) || 0), 0);
+  const brideRemaining = Math.max(0, brideBudget - brideSpent);
+  const brideUtilization = brideBudget > 0 ? Math.min(100, Math.round((brideSpent / brideBudget) * 100)) : 0;
+
   const sharedSpent = expenses.filter(e => e.owner === 'shared' || !e.owner).reduce((sum, e) => sum + (Number(e.actualAmount) || 0), 0);
 
   const budgetMetrics: BudgetMetrics = {
@@ -410,8 +495,18 @@ export const WeddingDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
     engagementSpent,
     weddingBudget,
     weddingSpent,
+    groomBudget,
     groomSpent,
+    groomPaid,
+    groomPending,
+    groomRemaining,
+    groomUtilization,
+    brideBudget,
     brideSpent,
+    bridePaid,
+    bridePending,
+    brideRemaining,
+    brideUtilization,
     sharedSpent,
   };
 
@@ -468,9 +563,15 @@ export const WeddingDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
         addGuest,
         updateGuest,
         deleteGuest,
+        batchSaveGuests,
+        matchSharedGuest,
         uploadInvitationCard,
         sendInvitations,
+        addAlbum,
+        updateAlbum,
+        deleteAlbum,
         addGalleryPhoto,
+        batchUploadPhotos,
         updateGalleryPhoto,
         deleteGalleryPhoto,
         adminDeletePhoto,

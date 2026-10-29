@@ -1,4 +1,5 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -78,8 +79,146 @@ function saveSessions() {
   }
 }
 
+// Top-level helpers
+function saveBase64Image(dataUrl: string, prefix = 'upload'): string | null {
+  if (!dataUrl || !dataUrl.startsWith('data:')) return dataUrl || null;
+  try {
+    const matches = dataUrl.match(/^data:([a-zA-Z0-9/.-]+);base64,(.+)$/);
+    if (!matches) return null;
+    const mime = matches[1];
+    let ext = 'jpg';
+    if (mime.includes('png')) ext = 'png';
+    else if (mime.includes('webp')) ext = 'webp';
+    else if (mime.includes('jpeg') || mime.includes('jpg')) ext = 'jpg';
+    const buffer = Buffer.from(matches[2], 'base64');
+    const safeName = `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`;
+    const filePath = path.join(uploadsDir, safeName);
+    fs.writeFileSync(filePath, buffer);
+    return `/uploads/${safeName}`;
+  } catch (err) {
+    console.error('Failed to save base64 image:', err);
+    return null;
+  }
+}
+
+function syncVendorAccounting(vendor: any, db: any) {
+  if (!vendor) return;
+  const vendorExpenses = (db.expenses || []).filter((e: any) => e.vendorId === vendor.id);
+  const expensePaid = vendorExpenses.reduce((sum: number, e: any) => sum + (Number(e.amountPaid) || 0), 0);
+  const advance = Number(vendor.advancePaid) || 0;
+  const hasAdvanceExpense = vendorExpenses.some((e: any) => (e.title || '').toLowerCase().includes('advance'));
+  const totalPaid = hasAdvanceExpense ? expensePaid : (advance + expensePaid);
+  vendor.amountPaid = totalPaid;
+  vendor.balanceDue = Math.max(0, (Number(vendor.agreedAmount || vendor.quotedAmount) || 0) - totalPaid);
+}
+
+function normalizePhone(p?: string): string {
+  if (!p) return '';
+  const digits = p.replace(/\D/g, '');
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function normalizeEmail(e?: string): string {
+  return (e || '').trim().toLowerCase();
+}
+
+function computeGuestAnalytics(guests: any[]) {
+  const all = guests || [];
+  const groomGuests = all.filter((g: any) => g.side === 'groom' || g.owner === 'groom');
+  const brideGuests = all.filter((g: any) => g.side === 'bride' || g.owner === 'bride');
+  const mutualGuests = all.filter((g: any) => g.side === 'mutual' || g.owner === 'shared');
+
+  const calcSideStats = (list: any[]) => ({
+    totalPax: list.reduce((sum, g) => sum + (Number(g.headcount) || 1), 0),
+    attendingPax: list.filter(g => g.rsvpStatus === 'attending').reduce((sum, g) => sum + (Number(g.headcount) || 1), 0),
+    pendingPax: list.filter(g => g.rsvpStatus === 'pending' || !g.rsvpStatus).reduce((sum, g) => sum + (Number(g.headcount) || 1), 0),
+    declinedPax: list.filter(g => g.rsvpStatus === 'declined').reduce((sum, g) => sum + (Number(g.headcount) || 1), 0),
+    invitationsSent: list.filter(g => g.invitationSent).length,
+  });
+
+  // Cross-side duplicate detection
+  const phoneMap = new Map<string, any[]>();
+  const emailMap = new Map<string, any[]>();
+
+  for (const g of all) {
+    const p = normalizePhone(g.mobile);
+    if (p && p.length >= 7) {
+      if (!phoneMap.has(p)) phoneMap.set(p, []);
+      phoneMap.get(p)!.push(g);
+    }
+    const e = normalizeEmail(g.email);
+    if (e && e.includes('@') && !e.includes('.local')) {
+      if (!emailMap.has(e)) emailMap.set(e, []);
+      emailMap.get(e)!.push(g);
+    }
+  }
+
+  const duplicateGroups: Array<{ sharedId: string; guests: any[]; matchedOn: string; confirmed: boolean }> = [];
+  const processedGuestIds = new Set<string>();
+
+  const checkMatches = (map: Map<string, any[]>, type: string) => {
+    for (const [key, list] of map.entries()) {
+      if (list.length > 1) {
+        const hasGroom = list.some(g => g.side === 'groom' || g.owner === 'groom');
+        const hasBride = list.some(g => g.side === 'bride' || g.owner === 'bride');
+        if (hasGroom && hasBride) {
+          const ids = list.map(g => g.id).sort().join('_');
+          if (!processedGuestIds.has(ids)) {
+            processedGuestIds.add(ids);
+            const sharedId = list[0].sharedGuestId || `shared_grp_${key}`;
+            const confirmed = list.some(g => g.isConfirmedShared === true);
+            list.forEach(g => {
+              if (!g.sharedGuestId) g.sharedGuestId = sharedId;
+              if (confirmed) g.isConfirmedShared = true;
+            });
+            duplicateGroups.push({
+              sharedId,
+              guests: list,
+              matchedOn: type,
+              confirmed,
+            });
+          }
+        }
+      }
+    }
+  };
+
+  checkMatches(phoneMap, 'phone');
+  checkMatches(emailMap, 'email');
+
+  // Combined Headcount Calculation Rule:
+  // Each confirmed shared attendance group is counted only ONCE.
+  let combinedPax = 0;
+  const countedSharedGroups = new Set<string>();
+
+  for (const g of all) {
+    if (g.isConfirmedShared && g.sharedGuestId) {
+      if (!countedSharedGroups.has(g.sharedGuestId)) {
+        countedSharedGroups.add(g.sharedGuestId);
+        const groupMembers = all.filter(item => item.sharedGuestId === g.sharedGuestId);
+        const canonical = groupMembers.find(m => m.canonicalAttendanceGroupId)?.headcount ||
+                          Math.max(...groupMembers.map(m => Number(m.headcount) || 1));
+        combinedPax += canonical;
+      }
+    } else {
+      combinedPax += (Number(g.headcount) || 1);
+    }
+  }
+
+  const confirmedDuplicatesCount = duplicateGroups.filter(d => d.confirmed).length;
+
+  return {
+    groomSide: calcSideStats(groomGuests),
+    brideSide: calcSideStats(brideGuests),
+    mutualSide: calcSideStats(mutualGuests),
+    combinedEventPax: combinedPax,
+    uniqueGuestsCount: Math.max(0, all.length - confirmedDuplicatesCount),
+    duplicateGroupCount: duplicateGroups.length,
+    duplicateGroups,
+  };
+}
+
 // Seed clean database with ONLY the platform administrator account
-// All couple, ceremony, budget, expense, task, guest, and vendor data start completely empty!
 function getInitialData() {
   const superAdminAuth = hashPassword('Mayur@2107');
 
@@ -164,7 +303,33 @@ function getInitialData() {
         'Travel and accommodation': 0,
         'Entertainment and music': 0,
         'Rituals and ceremonies': 0,
-      }
+      },
+      groomCategoryBudgets: {
+        'Venue and decoration': 0,
+        'Catering and food': 0,
+        'Photography and videography': 0,
+        'Outfits and accessories': 0,
+        'Jewellery': 0,
+        'Makeup and grooming': 0,
+        'Invitations and printing': 0,
+        'Gifts and return gifts': 0,
+        'Travel and accommodation': 0,
+        'Entertainment and music': 0,
+        'Rituals and ceremonies': 0,
+      },
+      brideCategoryBudgets: {
+        'Venue and decoration': 0,
+        'Catering and food': 0,
+        'Photography and videography': 0,
+        'Outfits and accessories': 0,
+        'Jewellery': 0,
+        'Makeup and grooming': 0,
+        'Invitations and printing': 0,
+        'Gifts and return gifts': 0,
+        'Travel and accommodation': 0,
+        'Entertainment and music': 0,
+        'Rituals and ceremonies': 0,
+      },
     },
     expenses: [],
     tasks: [],
@@ -173,7 +338,59 @@ function getInitialData() {
     vendors: [],
     guests: [],
     invitationCards: [],
+    albums: [
+      {
+        id: 'album_eng',
+        name: 'Engagement Ceremony',
+        category: 'engagement',
+        description: 'Cherished memories of our ring ceremony & promise celebration',
+        owner: 'shared',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'album_wed',
+        name: 'Sacred Wedding Day',
+        category: 'wedding',
+        description: 'Vows, sacred rituals, and the royal wedding celebration',
+        owner: 'shared',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'album_prewed',
+        name: 'Pre-Wedding & Romance',
+        category: 'pre-wedding',
+        description: 'Love story and photoshoot captures',
+        owner: 'shared',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'album_bride',
+        name: "Bride's Private Album",
+        category: 'bride',
+        description: 'Bridal attire, jewellery trials, and mehndi memories',
+        owner: 'bride',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'album_groom',
+        name: "Groom's Private Album",
+        category: 'groom',
+        description: 'Sherwani fitting, baraat, and groom preparations',
+        owner: 'groom',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'album_reception',
+        name: 'Reception & Family',
+        category: 'reception',
+        description: 'Family portraits and evening celebration',
+        owner: 'shared',
+        createdAt: new Date().toISOString(),
+      },
+    ],
     gallery: [],
+    invitationHistory: [],
+    canonicalAttendanceGroups: {},
     activityLogs: [
       {
         id: 'act_1',
@@ -198,11 +415,25 @@ function readDB() {
     const content = fs.readFileSync(dbPath, 'utf-8');
     const data = JSON.parse(content);
 
-    // If database contains old sample Arjun/Ananya records, purge them to satisfy user prompt
+    // If database contains old sample Arjun/Ananya records, purge them
     if (data.coupleProfile?.groom?.name === 'Arjun Sharma') {
       const fresh = getInitialData();
       fs.writeFileSync(dbPath, JSON.stringify(fresh, null, 2), 'utf-8');
       return fresh;
+    }
+
+    // Ensure albums array exists
+    if (!data.albums || !Array.isArray(data.albums) || data.albums.length === 0) {
+      data.albums = getInitialData().albums;
+    }
+    if (!data.invitationHistory) {
+      data.invitationHistory = [];
+    }
+    if (!data.budgetConfig.groomCategoryBudgets) {
+      data.budgetConfig.groomCategoryBudgets = { ...data.budgetConfig.categoryBudgets };
+    }
+    if (!data.budgetConfig.brideCategoryBudgets) {
+      data.budgetConfig.brideCategoryBudgets = { ...data.budgetConfig.categoryBudgets };
     }
 
     return data;
@@ -248,22 +479,11 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
     }
   }
 
-  const db = readDB();
-
-  // Super admin fallback if token matches superadmin session
-  if (!session) {
-    const superAdminUser = db.users.find((u: any) => u.username === 'voyaramedia');
-    if (superAdminUser && token.length >= 32) {
-      session = { userId: superAdminUser.id, token, createdAt: Date.now() };
-      sessions.set(token, session);
-      saveSessions();
-    }
-  }
-
   if (!session) {
     return res.status(401).json({ error: 'Unauthorized: Session expired or invalid' });
   }
 
+  const db = readDB();
   const user = db.users.find((u: any) => u.id === session.userId);
   if (!user) {
     sessions.delete(token);
@@ -413,6 +633,9 @@ app.post('/api/auth/register-couple', (req: Request, res: Response) => {
   const groomId = 'usr_groom_' + Date.now();
   const brideId = 'usr_bride_' + (Date.now() + 1);
 
+  const savedGroomPhoto = groomPhotoUrl ? (groomPhotoUrl.startsWith('data:') ? saveBase64Image(groomPhotoUrl, 'groom') : groomPhotoUrl) : '';
+  const savedBridePhoto = bridePhotoUrl ? (bridePhotoUrl.startsWith('data:') ? saveBase64Image(bridePhotoUrl, 'bride') : bridePhotoUrl) : '';
+
   const groomUser = {
     id: groomId,
     weddingId: newWeddingId,
@@ -421,6 +644,7 @@ app.post('/api/auth/register-couple', (req: Request, res: Response) => {
     name: groomName.trim(),
     role: 'groom',
     relation: 'Groom',
+    avatarUrl: savedGroomPhoto || '',
     passwordHash: groomAuth.hash,
     salt: groomAuth.salt,
     permissions: {
@@ -442,6 +666,7 @@ app.post('/api/auth/register-couple', (req: Request, res: Response) => {
     name: brideName.trim(),
     role: 'bride',
     relation: 'Bride',
+    avatarUrl: savedBridePhoto || '',
     passwordHash: brideAuth.hash,
     salt: brideAuth.salt,
     permissions: {
@@ -473,7 +698,7 @@ app.post('/api/auth/register-couple', (req: Request, res: Response) => {
       mobile: cleanGroomMobile,
       email: cleanGroomEmail,
       bio: '',
-      photoUrl: groomPhotoUrl || '',
+      photoUrl: savedGroomPhoto || '',
     },
     bride: {
       name: brideName.trim(),
@@ -481,7 +706,7 @@ app.post('/api/auth/register-couple', (req: Request, res: Response) => {
       mobile: cleanBrideMobile,
       email: cleanBrideEmail,
       bio: '',
-      photoUrl: bridePhotoUrl || '',
+      photoUrl: savedBridePhoto || '',
     },
     coverPhotoUrl: '',
     story: '',
@@ -743,23 +968,18 @@ app.get('/api/wedding-data', optionalAuth, (req: Request, res: Response) => {
   const user = (req as any).user;
 
   const allGuests = db.guests || [];
-  const groomSideGuests = allGuests.filter((g: any) => g.side === 'groom' || g.owner === 'groom');
-  const brideSideGuests = allGuests.filter((g: any) => g.side === 'bride' || g.owner === 'bride');
-  const mutualGuests = allGuests.filter((g: any) => g.side === 'mutual' || g.owner === 'shared');
-
-  const calcStats = (list: any[]) => ({
-    totalPax: list.reduce((sum, g) => sum + (Number(g.headcount) || 1), 0),
-    attendingPax: list.filter(g => g.rsvpStatus === 'attending').reduce((sum, g) => sum + (Number(g.headcount) || 1), 0),
-    pendingPax: list.filter(g => g.rsvpStatus === 'pending' || !g.rsvpStatus).reduce((sum, g) => sum + (Number(g.headcount) || 1), 0),
-    declinedPax: list.filter(g => g.rsvpStatus === 'declined').reduce((sum, g) => sum + (Number(g.headcount) || 1), 0),
-    invitationsSent: list.filter(g => g.invitationSent).length,
-  });
+  const guestAnalytics = computeGuestAnalytics(allGuests);
 
   const sharedGuestStats = {
-    groomSide: calcStats(groomSideGuests),
-    brideSide: calcStats(brideSideGuests),
-    mutualSide: calcStats(mutualGuests),
+    groomSide: guestAnalytics.groomSide,
+    brideSide: guestAnalytics.brideSide,
+    mutualSide: guestAnalytics.mutualSide,
+    combinedEventPax: guestAnalytics.combinedEventPax,
+    uniqueGuestsCount: guestAnalytics.uniqueGuestsCount,
+    duplicateGroupCount: guestAnalytics.duplicateGroupCount,
   };
+
+  const defaultAlbums = (db.albums || []).filter((a: any) => a.owner === 'shared');
 
   if (!user) {
     return res.json({
@@ -775,8 +995,9 @@ app.get('/api/wedding-data', optionalAuth, (req: Request, res: Response) => {
       vendors: db.vendors,
       guests: db.guests.filter((g: any) => g.owner === 'shared' || g.side === 'mutual'),
       sharedGuestStats,
-      invitationCards: db.invitationCards,
-      gallery: db.gallery,
+      invitationCards: db.invitationCards || [],
+      albums: defaultAlbums,
+      gallery: (db.gallery || []).filter((g: any) => g.owner === 'shared'),
       activityLogs: db.activityLogs.slice(0, 50),
     });
   }
@@ -807,12 +1028,32 @@ app.get('/api/wedding-data', optionalAuth, (req: Request, res: Response) => {
         return false;
       });
 
+  // Strict financial data separation:
+  // Bride never sees groom private financial figures
+  // Groom never sees bride private financial figures
+  let userBudgetConfig = db.budgetConfig;
+  if (isBride) {
+    userBudgetConfig = {
+      ...db.budgetConfig,
+      groomBudget: 0,
+      groomCategoryBudgets: {},
+      categoryBudgets: db.budgetConfig.brideCategoryBudgets || db.budgetConfig.categoryBudgets,
+    };
+  } else if (isGroom) {
+    userBudgetConfig = {
+      ...db.budgetConfig,
+      brideBudget: 0,
+      brideCategoryBudgets: {},
+      categoryBudgets: db.budgetConfig.groomCategoryBudgets || db.budgetConfig.categoryBudgets,
+    };
+  }
+
   return res.json({
     weddingId: db.masterWeddingId || '',
     users: db.users.map(sanitizeUser),
     coupleProfile: db.coupleProfile,
     events: filterByOwner(db.events),
-    budgetConfig: db.budgetConfig,
+    budgetConfig: userBudgetConfig,
     expenses: filterByOwner(db.expenses),
     tasks: filterByOwner(db.tasks),
     checklists: filterByOwner(db.checklists || []),
@@ -820,8 +1061,9 @@ app.get('/api/wedding-data', optionalAuth, (req: Request, res: Response) => {
     vendors: db.vendors,
     guests: filteredGuests,
     sharedGuestStats,
-    invitationCards: db.invitationCards,
-    gallery: db.gallery,
+    invitationCards: db.invitationCards || [],
+    albums: filterByOwner(db.albums || []),
+    gallery: filterByOwner(db.gallery || []),
     activityLogs: db.activityLogs.slice(0, 50),
   });
 });
@@ -860,6 +1102,10 @@ app.put('/api/couple-profile', authMiddleware, (req: Request, res: Response) => 
 // PUT /api/budget-config
 app.put('/api/budget-config', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user;
+  if (user.role !== 'admin' && user.role !== 'groom' && user.role !== 'bride' && !user.permissions?.canEditBudget) {
+    return res.status(403).json({ error: 'Forbidden: Insufficient permissions to modify budget configuration.' });
+  }
+
   const { engagementBudget, weddingBudget, combinedBudget, groomBudget, brideBudget, categoryBudgets } = req.body;
 
   const db = readDB();
@@ -1031,18 +1277,24 @@ app.delete('/api/events/:id', authMiddleware, (req: Request, res: Response) => {
 
   db.events = db.events.filter((e: any) => e.id !== id);
 
-  // If deleting engagement or wedding event, clean profile link
+  // Only clean profile link if this was the primary event or no other event of this type remains
   if (event.type === 'engagement') {
-    db.coupleProfile.engagementDate = '';
-    db.coupleProfile.engagementVenue = '';
-    db.coupleProfile.engagementAddress = '';
-    db.coupleProfile.engagementMapLink = '';
+    const remainingEng = db.events.filter((e: any) => e.type === 'engagement');
+    if (id === 'evt_eng' || remainingEng.length === 0 || db.coupleProfile.engagementDate === event.dateTime) {
+      db.coupleProfile.engagementDate = remainingEng[0]?.dateTime || '';
+      db.coupleProfile.engagementVenue = remainingEng[0]?.venue || '';
+      db.coupleProfile.engagementAddress = remainingEng[0]?.address || '';
+      db.coupleProfile.engagementMapLink = remainingEng[0]?.mapLink || '';
+    }
   }
   if (event.type === 'wedding') {
-    db.coupleProfile.weddingDate = '';
-    db.coupleProfile.weddingVenue = '';
-    db.coupleProfile.weddingAddress = '';
-    db.coupleProfile.weddingMapLink = '';
+    const remainingWed = db.events.filter((e: any) => e.type === 'wedding');
+    if (id === 'evt_wed' || remainingWed.length === 0 || db.coupleProfile.weddingDate === event.dateTime) {
+      db.coupleProfile.weddingDate = remainingWed[0]?.dateTime || '';
+      db.coupleProfile.weddingVenue = remainingWed[0]?.venue || '';
+      db.coupleProfile.weddingAddress = remainingWed[0]?.address || '';
+      db.coupleProfile.weddingMapLink = remainingWed[0]?.mapLink || '';
+    }
   }
 
   db.activityLogs.unshift({
@@ -1090,16 +1342,14 @@ app.post('/api/expenses', authMiddleware, (req: Request, res: Response) => {
   const db = readDB();
   db.expenses.unshift(newExpense);
 
+
   if (newExpense.vendorId) {
     const vendor = db.vendors.find((v: any) => v.id === newExpense.vendorId);
     if (vendor) {
       if (!vendor.linkedExpenseIds.includes(newExpense.id)) {
         vendor.linkedExpenseIds.push(newExpense.id);
       }
-      const vendorExpenses = db.expenses.filter((e: any) => e.vendorId === vendor.id);
-      const totalPaid = vendorExpenses.reduce((sum: number, e: any) => sum + (Number(e.amountPaid) || 0), 0);
-      vendor.amountPaid = totalPaid;
-      vendor.balanceDue = Math.max(0, (Number(vendor.agreedAmount) || 0) - totalPaid);
+      syncVendorAccounting(vendor, db);
     }
   }
 
@@ -1155,10 +1405,7 @@ app.put('/api/expenses/:id', authMiddleware, (req: Request, res: Response) => {
   if (vendorId) {
     const vendor = db.vendors.find((v: any) => v.id === vendorId);
     if (vendor) {
-      const vendorExpenses = db.expenses.filter((e: any) => e.vendorId === vendor.id);
-      const totalPaid = vendorExpenses.reduce((sum: number, e: any) => sum + (Number(e.amountPaid) || 0), 0);
-      vendor.amountPaid = totalPaid;
-      vendor.balanceDue = Math.max(0, (Number(vendor.agreedAmount) || 0) - totalPaid);
+      syncVendorAccounting(vendor, db);
     }
   }
 
@@ -1197,10 +1444,7 @@ app.delete('/api/expenses/:id', authMiddleware, (req: Request, res: Response) =>
     const vendor = db.vendors.find((v: any) => v.id === expense.vendorId);
     if (vendor) {
       vendor.linkedExpenseIds = vendor.linkedExpenseIds.filter((eid: string) => eid !== id);
-      const vendorExpenses = db.expenses.filter((e: any) => e.vendorId === vendor.id);
-      const totalPaid = vendorExpenses.reduce((sum: number, e: any) => sum + (Number(e.amountPaid) || 0), 0);
-      vendor.amountPaid = totalPaid;
-      vendor.balanceDue = Math.max(0, (Number(vendor.agreedAmount) || 0) - totalPaid);
+      syncVendorAccounting(vendor, db);
     }
   }
 
@@ -1663,24 +1907,32 @@ app.post('/api/guests', authMiddleware, (req: Request, res: Response) => {
   const side = guestData.side || (user.role === 'groom' ? 'groom' : user.role === 'bride' ? 'bride' : 'mutual');
   const owner = guestData.owner || (side === 'mutual' ? 'shared' : side);
 
+  const db = readDB();
+  db.guests = db.guests || [];
+
   const newGuest = {
-    id: 'gst_' + Date.now(),
-    weddingId: readDB().masterWeddingId || '',
+    id: 'gst_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+    weddingId: db.masterWeddingId || '',
+    srNo: db.guests.length + 1,
     ...guestData,
     side,
     owner,
-    headcount: Number(guestData.headcount) || 1,
+    headcount: Math.max(1, Math.round(Number(guestData.headcount) || 1)),
     rsvpStatus: guestData.rsvpStatus || 'pending',
     eventsInvited: guestData.eventsInvited || ['wedding'],
+    invitationType: guestData.invitationType || 'wedding',
+    customFunctionName: guestData.customFunctionName || '',
     invitationSent: Boolean(guestData.invitationSent),
+    invitationHistory: guestData.invitationHistory || [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
 
-  const db = readDB();
   db.guests.push(newGuest);
 
   db.activityLogs.unshift({
     id: 'act_' + Date.now(),
-    action: `Added guest: ${newGuest.name}`,
+    action: `Added guest: ${newGuest.name} (${newGuest.headcount} pax, ${side} side)`,
     category: 'Guests',
     userName: user.name,
     timestamp: new Date().toISOString(),
@@ -1688,6 +1940,183 @@ app.post('/api/guests', authMiddleware, (req: Request, res: Response) => {
 
   writeDB(db);
   res.status(201).json(newGuest);
+});
+
+// POST /api/guests/batch (Spreadsheet direct data entry / bulk paste / CSV save)
+app.post('/api/guests/batch', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { guests } = req.body;
+
+  if (!Array.isArray(guests)) {
+    return res.status(400).json({ error: 'Expected an array of guest rows.' });
+  }
+
+  const db = readDB();
+  db.guests = db.guests || [];
+
+  const defaultSide = user.role === 'groom' ? 'groom' : user.role === 'bride' ? 'bride' : 'mutual';
+  const defaultOwner = defaultSide === 'mutual' ? 'shared' : defaultSide;
+
+  // Track existing IDs
+  const existingMap = new Map<string, any>(db.guests.map((g: any) => [g.id, g]));
+  const incomingIds = new Set<string>();
+
+  guests.forEach((g: any, index: number) => {
+    if (!g.name || !g.name.trim()) return; // skip empty rows
+
+    const validHeadcount = Math.max(1, Math.round(Number(g.headcount) || 1));
+    const side = g.side || defaultSide;
+    const owner = g.owner || (side === 'mutual' ? 'shared' : side);
+
+    if (g.id && existingMap.has(g.id)) {
+      // Update existing
+      const current = existingMap.get(g.id);
+      // Enforce side access
+      if (user.role === 'groom' && current.owner === 'bride') return;
+      if (user.role === 'bride' && current.owner === 'groom') return;
+
+      Object.assign(current, {
+        srNo: index + 1,
+        name: g.name.trim(),
+        side,
+        owner,
+        relation: g.relation ? g.relation.trim() : current.relation,
+        mobile: g.mobile ? g.mobile.trim() : current.mobile,
+        email: g.email ? g.email.trim().toLowerCase() : current.email,
+        headcount: validHeadcount,
+        rsvpStatus: g.rsvpStatus || current.rsvpStatus || 'pending',
+        dietary: g.dietary || current.dietary,
+        eventsInvited: g.eventsInvited || current.eventsInvited || ['wedding'],
+        invitationType: g.invitationType || current.invitationType || 'wedding',
+        customFunctionName: g.customFunctionName || current.customFunctionName || '',
+        notes: g.notes !== undefined ? g.notes : current.notes,
+        updatedAt: new Date().toISOString(),
+      });
+      incomingIds.add(g.id);
+    } else {
+      // New row
+      const newId = g.id || ('gst_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6));
+      const newRecord = {
+        id: newId,
+        weddingId: db.masterWeddingId || '',
+        srNo: index + 1,
+        name: g.name.trim(),
+        side,
+        owner,
+        relation: g.relation ? g.relation.trim() : '',
+        mobile: g.mobile ? g.mobile.trim() : '',
+        email: g.email ? g.email.trim().toLowerCase() : '',
+        headcount: validHeadcount,
+        rsvpStatus: g.rsvpStatus || 'pending',
+        dietary: g.dietary || 'Vegetarian',
+        eventsInvited: g.eventsInvited || ['wedding'],
+        invitationType: g.invitationType || 'wedding',
+        customFunctionName: g.customFunctionName || '',
+        invitationSent: Boolean(g.invitationSent),
+        invitationHistory: [],
+        notes: g.notes || '',
+        createdBy: user.id,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      db.guests.push(newRecord);
+      incomingIds.add(newId);
+    }
+  });
+
+  // Re-sequence sequential serial numbers
+  db.guests.forEach((g: any, i: number) => {
+    g.srNo = i + 1;
+  });
+
+  db.activityLogs.unshift({
+    id: 'act_' + Date.now(),
+    action: `Spreadsheet batch update: ${guests.length} guest rows synced`,
+    category: 'Guests',
+    userName: user.name,
+    timestamp: new Date().toISOString(),
+  });
+
+  writeDB(db);
+  const analytics = computeGuestAnalytics(db.guests);
+  res.json({
+    success: true,
+    guests: db.guests,
+    analytics,
+    message: 'Guest spreadsheet successfully synchronized.',
+  });
+});
+
+// POST /api/guests/match (Confirm/Link or Unlink Shared Guests between Bride & Groom)
+app.post('/api/guests/match', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { guestId1, guestId2, confirm, canonicalHeadcount } = req.body;
+
+  if (!guestId1 || !guestId2) {
+    return res.status(400).json({ error: 'Both guest IDs are required to link shared attendance.' });
+  }
+
+  const db = readDB();
+  const g1 = (db.guests || []).find((g: any) => g.id === guestId1);
+  const g2 = (db.guests || []).find((g: any) => g.id === guestId2);
+
+  if (!g1 || !g2) {
+    return res.status(404).json({ error: 'One or both guest records were not found.' });
+  }
+
+  if (confirm) {
+    const sharedId = g1.sharedGuestId || g2.sharedGuestId || `shared_${Date.now()}`;
+    const headcountVal = canonicalHeadcount ? Math.max(1, Number(canonicalHeadcount)) : Math.max(g1.headcount, g2.headcount);
+
+    g1.sharedGuestId = sharedId;
+    g1.isConfirmedShared = true;
+    g1.matchedGuestId = g2.id;
+    g1.canonicalAttendanceGroupId = sharedId;
+
+    g2.sharedGuestId = sharedId;
+    g2.isConfirmedShared = true;
+    g2.matchedGuestId = g1.id;
+    g2.canonicalAttendanceGroupId = sharedId;
+
+    db.canonicalAttendanceGroups = db.canonicalAttendanceGroups || {};
+    db.canonicalAttendanceGroups[sharedId] = {
+      confirmed: true,
+      canonicalHeadcount: headcountVal,
+    };
+
+    db.activityLogs.unshift({
+      id: 'act_' + Date.now(),
+      action: `Confirmed shared attendance: ${g1.name} (Bride) & ${g2.name} (Groom)`,
+      category: 'Guests',
+      userName: user.name,
+      timestamp: new Date().toISOString(),
+    });
+  } else {
+    // Unlink
+    delete g1.isConfirmedShared;
+    delete g1.matchedGuestId;
+    delete g1.canonicalAttendanceGroupId;
+
+    delete g2.isConfirmedShared;
+    delete g2.matchedGuestId;
+    delete g2.canonicalAttendanceGroupId;
+
+    db.activityLogs.unshift({
+      id: 'act_' + Date.now(),
+      action: `Unlinked separate attendance: ${g1.name} & ${g2.name}`,
+      category: 'Guests',
+      userName: user.name,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  writeDB(db);
+  const analytics = computeGuestAnalytics(db.guests);
+  res.json({
+    success: true,
+    message: confirm ? 'Shared guest attendance linked successfully.' : 'Guest records kept separate.',
+    analytics,
+  });
 });
 
 // PUT /api/guests/:id
@@ -1713,7 +2142,8 @@ app.put('/api/guests/:id', authMiddleware, (req: Request, res: Response) => {
   db.guests[index] = {
     ...current,
     ...updates,
-    headcount: updates.headcount !== undefined ? Number(updates.headcount) : current.headcount,
+    headcount: updates.headcount !== undefined ? Math.max(1, Math.round(Number(updates.headcount) || 1)) : current.headcount,
+    updatedAt: new Date().toISOString(),
   };
 
   writeDB(db);
@@ -1753,7 +2183,7 @@ app.delete('/api/guests/:id', authMiddleware, (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// Invitations & E-Cards Endpoints
+// Invitations & Dynamic Messages Endpoints
 // -------------------------------------------------------------
 
 // POST /api/invitations/card
@@ -1784,30 +2214,97 @@ app.post('/api/invitations/card', authMiddleware, (req: Request, res: Response) 
   res.status(201).json(newCard);
 });
 
-// POST /api/invitations/send
+// POST /api/invitations/send (Dynamic message generation, history logging, and WhatsApp direct link)
 app.post('/api/invitations/send', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { guestIds } = req.body;
+  const { guestIds, invitationType = 'wedding', customFunctionName, customMessage, channel = 'whatsapp' } = req.body;
 
   if (!guestIds || !Array.isArray(guestIds) || guestIds.length === 0) {
     return res.status(400).json({ error: 'Select at least one guest to dispatch invitations.' });
   }
 
   const db = readDB();
+  const couple = db.coupleProfile;
+  const groomName = couple.groom?.name || 'Groom';
+  const brideName = couple.bride?.name || 'Bride';
+
+  // Dynamic template based on invitationType
+  let defaultMessage = '';
+  if (invitationType === 'engagement') {
+    const engDate = couple.engagementDate ? new Date(couple.engagementDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : 'our special day';
+    const engVenue = couple.engagementVenue || 'the banquet hall';
+    defaultMessage = `With great joy, we invite you to celebrate the engagement ceremony of ${brideName} and ${groomName} on ${engDate} at ${engVenue}. Your presence will make this occasion even more special.`;
+  } else if (invitationType === 'reception') {
+    const recVenue = couple.weddingVenue || 'our grand celebration venue';
+    defaultMessage = `We cordially invite you to the wedding reception of ${brideName} and ${groomName} at ${recVenue}. Your presence and blessings are sincerely appreciated.`;
+  } else if (invitationType === 'other') {
+    const funcName = customFunctionName || 'our auspicious celebration';
+    defaultMessage = `We warmly invite you to the sacred ${funcName} ceremony of ${brideName} and ${groomName}. We look forward to celebrating together.`;
+  } else {
+    // wedding
+    const wedDate = couple.weddingDate ? new Date(couple.weddingDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : 'our auspicious day';
+    const wedVenue = couple.weddingVenue || 'the celebration venue';
+    defaultMessage = `With the blessings of our families, we warmly invite you to the wedding ceremony of ${brideName} and ${groomName} on ${wedDate} at ${wedVenue}. We look forward to celebrating this special day with you.`;
+  }
+
+  const finalTemplate = (customMessage && customMessage.trim()) ? customMessage.trim() : defaultMessage;
+
   let updatedCount = 0;
+  const directDispatchLinks: Array<{ guestId: string; name: string; mobile: string; whatsappUrl?: string }> = [];
+
+  db.invitationHistory = db.invitationHistory || [];
 
   db.guests.forEach((g: any) => {
     if (guestIds.includes(g.id)) {
+      // Personalize guest name if token exists or prepend name
+      let personalized = finalTemplate;
+      if (personalized.includes('[Guest Name]')) {
+        personalized = personalized.replace(/\[Guest Name\]/g, g.name);
+      } else {
+        personalized = `Dear ${g.name},\n\n${personalized}`;
+      }
+
+      const invRecord = {
+        id: 'inv_rec_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+        invitationType,
+        customFunctionName: customFunctionName || '',
+        recipientName: g.name,
+        recipientContact: g.mobile || g.email || 'Digital Invite',
+        channel,
+        message: personalized,
+        sentBySide: user.role === 'groom' ? 'groom' : user.role === 'bride' ? 'bride' : (g.side === 'bride' ? 'bride' : 'groom'),
+        sentByName: user.name,
+        sentAt: new Date().toISOString(),
+        status: 'sent',
+      };
+
       g.invitationSent = true;
       g.invitationSentAt = new Date().toISOString();
       g.invitationSentBy = user.name;
+      g.invitationType = invitationType;
+      g.customFunctionName = customFunctionName;
+      g.invitationHistory = g.invitationHistory || [];
+      g.invitationHistory.push(invRecord);
+
+      db.invitationHistory.push(invRecord);
+
+      const cleanMobile = (g.mobile || '').replace(/\D/g, '');
+      const waUrl = cleanMobile ? `https://wa.me/${cleanMobile}?text=${encodeURIComponent(personalized)}` : undefined;
+
+      directDispatchLinks.push({
+        guestId: g.id,
+        name: g.name,
+        mobile: g.mobile,
+        whatsappUrl: waUrl,
+      });
+
       updatedCount++;
     }
   });
 
   db.activityLogs.unshift({
     id: 'act_' + Date.now(),
-    action: `Dispatched invitations to ${updatedCount} guests`,
+    action: `Dispatched ${invitationType.toUpperCase()} invitations to ${updatedCount} guests via ${channel}`,
     category: 'Invitations',
     userName: user.name,
     timestamp: new Date().toISOString(),
@@ -1817,72 +2314,336 @@ app.post('/api/invitations/send', authMiddleware, (req: Request, res: Response) 
   res.json({
     success: true,
     sentCount: updatedCount,
-    message: `Invitations sent to ${updatedCount} guests!`,
+    invitationType,
+    messageTemplate: finalTemplate,
+    directDispatchLinks,
+    message: `Invitations recorded for ${updatedCount} guests!`,
   });
 });
 
 // -------------------------------------------------------------
-// Gallery Endpoints
+// Photo Albums & Gallery Management Endpoints
 // -------------------------------------------------------------
 
-// POST /api/gallery
+// GET /api/albums
+app.get('/api/albums', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const db = readDB();
+  const allAlbums = db.albums || [];
+  const allPhotos = db.gallery || [];
+
+  const isSuperAdmin = user.role === 'admin';
+  const isGroom = user.role === 'groom';
+  const isBride = user.role === 'bride';
+
+  const filteredAlbums = isSuperAdmin
+    ? allAlbums
+    : allAlbums.filter((a: any) => {
+        const owner = a.owner || 'shared';
+        if (owner === 'shared') return true;
+        if (isGroom && owner === 'groom') return true;
+        if (isBride && owner === 'bride') return true;
+        return false;
+      });
+
+  // Calculate photo count for each album
+  const albumsWithCount = filteredAlbums.map((a: any) => ({
+    ...a,
+    photoCount: allPhotos.filter((p: any) => p.albumId === a.id).length,
+  }));
+
+  res.json(albumsWithCount);
+});
+
+// POST /api/albums (Create custom or ceremony album)
+app.post('/api/albums', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { name, description, category, owner } = req.body;
+
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: 'Album name is required.' });
+  }
+
+  const assignedOwner = owner || (user.role === 'groom' ? 'groom' : user.role === 'bride' ? 'bride' : 'shared');
+
+  const newAlbum = {
+    id: 'album_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+    weddingId: readDB().masterWeddingId || '',
+    name: name.trim(),
+    description: description ? description.trim() : '',
+    category: category || 'custom',
+    owner: assignedOwner,
+    createdAt: new Date().toISOString(),
+  };
+
+  const db = readDB();
+  db.albums = db.albums || [];
+  db.albums.push(newAlbum);
+
+  db.activityLogs.unshift({
+    id: 'act_' + Date.now(),
+    action: `Created photo album: "${newAlbum.name}" (${newAlbum.category})`,
+    category: 'Gallery',
+    userName: user.name,
+    timestamp: new Date().toISOString(),
+  });
+
+  writeDB(db);
+  res.status(201).json(newAlbum);
+});
+
+// PUT /api/albums/:id (Rename or update album)
+app.put('/api/albums/:id', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { id } = req.params;
+  const { name, description, category, owner } = req.body;
+
+  const db = readDB();
+  const index = (db.albums || []).findIndex((a: any) => a.id === id);
+  if (index === -1) {
+    return res.status(404).json({ error: 'Album not found.' });
+  }
+
+  const current = db.albums[index];
+  if (user.role === 'groom' && current.owner === 'bride') {
+    return res.status(403).json({ error: "Access denied: You cannot edit bride's private album." });
+  }
+  if (user.role === 'bride' && current.owner === 'groom') {
+    return res.status(403).json({ error: "Access denied: You cannot edit groom's private album." });
+  }
+
+  if (name) current.name = name.trim();
+  if (description !== undefined) current.description = description.trim();
+  if (category) current.category = category;
+  if (owner && (user.role === 'admin')) current.owner = owner;
+
+  writeDB(db);
+  res.json(current);
+});
+
+// DELETE /api/albums/:id (Delete album, preserves photos by unassigning them)
+app.delete('/api/albums/:id', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { id } = req.params;
+
+  const db = readDB();
+  const album = (db.albums || []).find((a: any) => a.id === id);
+  if (!album) {
+    return res.status(404).json({ error: 'Album not found.' });
+  }
+
+  if (user.role === 'groom' && album.owner === 'bride') {
+    return res.status(403).json({ error: "Access denied: You cannot delete bride's private album." });
+  }
+  if (user.role === 'bride' && album.owner === 'groom') {
+    return res.status(403).json({ error: "Access denied: You cannot delete groom's private album." });
+  }
+
+  // Preserve photos: unassign them from this album rather than deleting
+  (db.gallery || []).forEach((p: any) => {
+    if (p.albumId === id) {
+      p.albumId = '';
+    }
+  });
+
+  db.albums = (db.albums || []).filter((a: any) => a.id !== id);
+
+  db.activityLogs.unshift({
+    id: 'act_' + Date.now(),
+    action: `Deleted album: "${album.name}" (Photos preserved in Unassigned)`,
+    category: 'Gallery',
+    userName: user.name,
+    timestamp: new Date().toISOString(),
+  });
+
+  writeDB(db);
+  res.json({ success: true, message: `Album "${album.name}" deleted. Photos preserved.` });
+});
+
+// GET /api/gallery (Filtered by user role & optional albumId)
+app.get('/api/gallery', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { albumId } = req.query;
+  const db = readDB();
+  let photos = db.gallery || [];
+
+  const isSuperAdmin = user.role === 'admin';
+  const isGroom = user.role === 'groom';
+  const isBride = user.role === 'bride';
+
+  photos = photos.filter((p: any) => {
+    const owner = p.owner || 'shared';
+    if (isSuperAdmin) return true;
+    if (owner === 'shared') return true;
+    if (isGroom && owner === 'groom') return true;
+    if (isBride && owner === 'bride') return true;
+    return false;
+  });
+
+  if (albumId) {
+    photos = photos.filter((p: any) => p.albumId === albumId);
+  }
+
+  res.json(photos);
+});
+
+// POST /api/gallery (Upload single photo)
 app.post('/api/gallery', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user;
-  const { title, imageUrl, category, caption, date } = req.body;
+  const { title, imageUrl, albumId, category, caption, description, date, owner } = req.body;
 
   if (!imageUrl) {
     return res.status(400).json({ error: 'Photo image is required' });
   }
 
+  const assignedOwner = owner || (user.role === 'groom' ? 'groom' : user.role === 'bride' ? 'bride' : 'shared');
+
   const newItem = {
-    id: 'gal_' + Date.now(),
+    id: 'gal_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
     weddingId: readDB().masterWeddingId || '',
-    title: title || 'Celebration Memory',
+    albumId: albumId || '',
+    title: title ? title.trim() : 'Celebration Memory',
     imageUrl,
-    category: category || 'pre-wedding',
-    caption: caption || '',
+    category: category || 'wedding',
+    caption: caption ? caption.trim() : '',
+    description: description ? description.trim() : '',
     date: date || new Date().toISOString().split('T')[0],
-    owner: 'shared',
-    uploadedBy: user.name,
+    owner: assignedOwner,
+    uploadedBy: user.id,
+    uploadedByName: user.name,
+    createdAt: new Date().toISOString(),
   };
 
   const db = readDB();
   db.gallery = db.gallery || [];
   db.gallery.unshift(newItem);
 
+  db.activityLogs.unshift({
+    id: 'act_' + Date.now(),
+    action: `Uploaded photo: "${newItem.title}"`,
+    category: 'Gallery',
+    userName: user.name,
+    timestamp: new Date().toISOString(),
+  });
+
   writeDB(db);
   res.status(201).json(newItem);
 });
 
-// DELETE /api/gallery/:id
-app.delete('/api/gallery/:id', authMiddleware, (req: Request, res: Response) => {
-  const { id } = req.params;
+// POST /api/gallery/batch (Upload multiple photos into an album)
+app.post('/api/gallery/batch', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { photos, albumId, category } = req.body;
+
+  if (!Array.isArray(photos) || photos.length === 0) {
+    return res.status(400).json({ error: 'At least one photo is required.' });
+  }
+
   const db = readDB();
-  db.gallery = (db.gallery || []).filter((g: any) => g.id !== id);
+  db.gallery = db.gallery || [];
+  const defaultOwner = user.role === 'groom' ? 'groom' : user.role === 'bride' ? 'bride' : 'shared';
+
+  const createdItems: any[] = [];
+
+  photos.forEach((p: any) => {
+    if (!p.imageUrl) return;
+    const item = {
+      id: 'gal_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+      weddingId: db.masterWeddingId || '',
+      albumId: albumId || p.albumId || '',
+      title: p.title ? p.title.trim() : 'Celebration Photo',
+      imageUrl: p.imageUrl,
+      category: category || p.category || 'wedding',
+      caption: p.caption ? p.caption.trim() : '',
+      description: p.description ? p.description.trim() : '',
+      date: p.date || new Date().toISOString().split('T')[0],
+      owner: p.owner || defaultOwner,
+      uploadedBy: user.id,
+      uploadedByName: user.name,
+      createdAt: new Date().toISOString(),
+    };
+    db.gallery.unshift(item);
+    createdItems.push(item);
+  });
+
+  db.activityLogs.unshift({
+    id: 'act_' + Date.now(),
+    action: `Batch uploaded ${createdItems.length} photos`,
+    category: 'Gallery',
+    userName: user.name,
+    timestamp: new Date().toISOString(),
+  });
+
   writeDB(db);
-  res.json({ success: true });
+  res.status(201).json({ success: true, count: createdItems.length, items: createdItems });
 });
 
-// PUT /api/gallery/:id (Update photo title, category, caption, date)
+// PUT /api/gallery/:id (Update photo title, albumId, caption, description, replace image)
 app.put('/api/gallery/:id', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
   const { id } = req.params;
-  const { title, category, caption, date } = req.body;
+  const { title, albumId, category, caption, description, date, imageUrl, owner } = req.body;
+
   const db = readDB();
   const index = (db.gallery || []).findIndex((g: any) => g.id === id);
   if (index === -1) {
     return res.status(404).json({ error: 'Gallery photo not found' });
   }
 
-  if (title !== undefined) db.gallery[index].title = title;
-  if (category !== undefined) db.gallery[index].category = category;
-  if (caption !== undefined) db.gallery[index].caption = caption;
-  if (date !== undefined) db.gallery[index].date = date;
+  const current = db.gallery[index];
+  if (user.role === 'groom' && current.owner === 'bride') {
+    return res.status(403).json({ error: "Access denied: You cannot modify bride's private photo." });
+  }
+  if (user.role === 'bride' && current.owner === 'groom') {
+    return res.status(403).json({ error: "Access denied: You cannot modify groom's private photo." });
+  }
+
+  if (title !== undefined) current.title = title.trim();
+  if (albumId !== undefined) current.albumId = albumId;
+  if (category !== undefined) current.category = category;
+  if (caption !== undefined) current.caption = caption.trim();
+  if (description !== undefined) current.description = description.trim();
+  if (date !== undefined) current.date = date;
+  if (imageUrl !== undefined) current.imageUrl = imageUrl;
+  if (owner !== undefined && (user.role === 'admin')) current.owner = owner;
 
   writeDB(db);
-  res.json(db.gallery[index]);
+  res.json(current);
 });
 
-// DELETE /api/admin/photos/:id (Super Admin delete ANY photo: groom, bride, cover, or gallery)
+// DELETE /api/gallery/:id
+app.delete('/api/gallery/:id', authMiddleware, (req: Request, res: Response) => {
+  const user = (req as any).user;
+  const { id } = req.params;
+  const db = readDB();
+
+  const current = (db.gallery || []).find((g: any) => g.id === id);
+  if (!current) {
+    return res.status(404).json({ error: 'Photo not found.' });
+  }
+
+  if (user.role === 'groom' && current.owner === 'bride') {
+    return res.status(403).json({ error: "Access denied: You cannot delete bride's private photo." });
+  }
+  if (user.role === 'bride' && current.owner === 'groom') {
+    return res.status(403).json({ error: "Access denied: You cannot delete groom's private photo." });
+  }
+
+  db.gallery = (db.gallery || []).filter((g: any) => g.id !== id);
+
+  db.activityLogs.unshift({
+    id: 'act_' + Date.now(),
+    action: `Deleted photo: "${current.title}"`,
+    category: 'Gallery',
+    userName: user.name,
+    timestamp: new Date().toISOString(),
+  });
+
+  writeDB(db);
+  res.json({ success: true });
+});
+
+// DELETE /api/admin/photos/:id (Super Admin delete ANY photo)
 app.delete('/api/admin/photos/:id', authMiddleware, (req: Request, res: Response) => {
   const user = (req as any).user;
   if (user.role !== 'admin') {
@@ -1947,6 +2708,10 @@ app.get('/api/users', authMiddleware, (req: Request, res: Response) => {
 // POST /api/users (Add family member)
 app.post('/api/users', authMiddleware, (req: Request, res: Response) => {
   const adminUser = (req as any).user;
+  if (adminUser.role !== 'admin' && !adminUser.permissions?.canManageUsers) {
+    return res.status(403).json({ error: 'Forbidden: Insufficient permissions to manage users.' });
+  }
+
   const { name, mobile, email, password, role, relation, permissions } = req.body;
 
   if (!name || !mobile || !password) {
@@ -2002,6 +2767,11 @@ app.post('/api/users', authMiddleware, (req: Request, res: Response) => {
 app.put('/api/users/:id', authMiddleware, (req: Request, res: Response) => {
   const adminUser = (req as any).user;
   const { id } = req.params;
+
+  if (adminUser.role !== 'admin' && !adminUser.permissions?.canManageUsers && adminUser.id !== id) {
+    return res.status(403).json({ error: 'Forbidden: Insufficient permissions to edit user profile.' });
+  }
+
   const { name, mobile, email, role, relation, permissions, password } = req.body;
 
   const db = readDB();
@@ -2021,9 +2791,11 @@ app.put('/api/users/:id', authMiddleware, (req: Request, res: Response) => {
   if (name) target.name = name.trim();
   if (mobile) target.mobile = mobile.trim();
   if (email !== undefined) target.email = email.trim().toLowerCase();
-  if (role) target.role = role;
+  if (role && (adminUser.role === 'admin' || adminUser.permissions?.canManageUsers)) target.role = role;
   if (relation !== undefined) target.relation = relation;
-  if (permissions) target.permissions = { ...target.permissions, ...permissions };
+  if (permissions && (adminUser.role === 'admin' || adminUser.permissions?.canManageUsers)) {
+    target.permissions = { ...target.permissions, ...permissions };
+  }
   target.updatedAt = new Date().toISOString();
 
   writeDB(db);
@@ -2033,6 +2805,10 @@ app.put('/api/users/:id', authMiddleware, (req: Request, res: Response) => {
 // DELETE /api/users/:id
 app.delete('/api/users/:id', authMiddleware, (req: Request, res: Response) => {
   const adminUser = (req as any).user;
+  if (adminUser.role !== 'admin' && !adminUser.permissions?.canManageUsers) {
+    return res.status(403).json({ error: 'Forbidden: Insufficient permissions to delete users.' });
+  }
+
   const { id } = req.params;
 
   if (id === adminUser.id) {
@@ -2057,7 +2833,7 @@ app.delete('/api/users/:id', authMiddleware, (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Image / Document Upload Endpoint
 // -------------------------------------------------------------
-app.post('/api/upload', authMiddleware, (req: Request, res: Response) => {
+app.post('/api/upload', optionalAuth, (req: Request, res: Response) => {
   const { dataUrl, filename } = req.body;
 
   if (!dataUrl) {
@@ -2104,7 +2880,7 @@ async function setupServer() {
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);

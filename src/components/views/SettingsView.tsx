@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useWeddingData } from '../../context/WeddingDataContext.tsx';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { api } from '../../lib/api.ts';
+import { useToast } from '../../context/ToastContext.tsx';
 import {
   Settings as SettingsIcon,
   Heart,
@@ -20,9 +21,10 @@ import {
 export const SettingsView: React.FC = () => {
   const { data, updateCoupleProfile } = useWeddingData();
   const { user } = useAuth();
+  const { showToast } = useToast();
 
   const couple = data?.coupleProfile;
-  const weddingId = data?.weddingId || couple?.weddingId || 'WED-2026-8742';
+  const weddingId = data?.weddingId || couple?.weddingId || '';
 
   // Couple names, title, and dates state
   const [weddingTitle, setWeddingTitle] = useState(couple?.weddingTitle || '');
@@ -82,9 +84,10 @@ export const SettingsView: React.FC = () => {
       });
 
       setCoupleSuccess('Wedding registration details & venues updated successfully!');
+      showToast('Wedding settings saved successfully!', 'success');
       setTimeout(() => setCoupleSuccess(''), 4000);
     } catch (err: any) {
-      alert(err.message || 'Failed to update wedding settings');
+      showToast(err.message || 'Failed to update wedding settings', 'error');
     }
   };
 
@@ -399,9 +402,11 @@ export const SettingsView: React.FC = () => {
           </div>
         )}
 
-        <div className="p-3 bg-[#FAF5EB] rounded-xl border border-[#E8DEC8] text-xs text-[#6D5220]">
-          Super Admin voyaramedia / voyaramedia@gmail.com initial password: <strong className="font-mono">Mayur@2107</strong>. You can change it securely here anytime.
-        </div>
+        {user?.role === 'admin' && (
+          <div className="p-3 bg-[#FAF5EB] rounded-xl border border-[#E8DEC8] text-xs text-[#6D5220]">
+            Super Admin voyaramedia / voyaramedia@gmail.com initial password: <strong className="font-mono">Mayur@2107</strong>. You can change it securely here anytime.
+          </div>
+        )}
 
         <div className="space-y-3 max-w-md">
           <div>

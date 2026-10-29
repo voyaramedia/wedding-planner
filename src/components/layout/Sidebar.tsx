@@ -61,7 +61,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const groomName = data?.coupleProfile?.groom?.name || 'Groom';
   const brideName = data?.coupleProfile?.bride?.name || 'Bride';
   const hashtag = data?.coupleProfile?.hashtag || '#OurWedding';
-  const weddingId = data?.weddingId || 'WED-2026-8742';
+  const weddingId = data?.weddingId || data?.coupleProfile?.weddingId || '';
 
   const isGroomOrAdmin = user?.role === 'groom' || user?.role === 'admin';
   const isBrideOrAdmin = user?.role === 'bride' || user?.role === 'admin';
@@ -143,7 +143,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 {groomName} & {brideName}
               </div>
               <span className="font-mono text-[10px] font-bold text-[#8C6D34] bg-[#FAF5EB] px-2 py-0.5 rounded border border-[#E8DEC8]">
-                {weddingId}
+                {weddingId || 'Not Set'}
               </span>
             </div>
             <div className="text-[10px] text-[#A89A96] tracking-wide mt-0.5 truncate">

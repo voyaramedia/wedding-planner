@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account and role details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "mobile": { "type": "string" },
+        "role": { "type": "string" },
+        "weddingId": { "type": "string" }
+      },
+      "required": ["id", "name", "role"]
+    },
+    "WeddingData": {
+      "title": "WeddingData",
+      "description": "Master wedding data entity",
+      "type": "object",
+      "properties": {
+        "masterWeddingId": { "type": "string" },
+        "coupleProfile": { "type": "object" },
+        "budgetConfig": { "type": "object" },
+        "events": { "type": "array" },
+        "expenses": { "type": "array" },
+        "tasks": { "type": "array" },
+        "guests": { "type": "array" },
+        "photoAlbums": { "type": "array" },
+        "gallery": { "type": "array" }
+      },
+      "required": ["masterWeddingId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Registered users collection"
+    },
+    "/weddings/{weddingId}": {
+      "schema": "WeddingData",
+      "description": "Wedding state and operational records"
+    }
+  }
+}

@@ -18,6 +18,9 @@ import {
   Upload,
   Copy,
   Check,
+  X,
+  RefreshCw,
+  Camera,
 } from 'lucide-react';
 import { UserRole } from '../../types/index.ts';
 import { fireCelebrationConfetti } from '../../lib/utils.ts';
@@ -43,6 +46,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess }) => {
   const [groomEmail, setGroomEmail] = useState('');
   const [groomPassword, setGroomPassword] = useState('');
   const [groomPhotoUrl, setGroomPhotoUrl] = useState('');
+  const [groomUploading, setGroomUploading] = useState(false);
+  const [groomFileError, setGroomFileError] = useState<string | null>(null);
   const [showGroomPass, setShowGroomPass] = useState(false);
 
   const [brideName, setBrideName] = useState('');
@@ -50,6 +55,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess }) => {
   const [brideEmail, setBrideEmail] = useState('');
   const [bridePassword, setBridePassword] = useState('');
   const [bridePhotoUrl, setBridePhotoUrl] = useState('');
+  const [brideUploading, setBrideUploading] = useState(false);
+  const [brideFileError, setBrideFileError] = useState<string | null>(null);
   const [showBridePass, setShowBridePass] = useState(false);
 
   const [weddingTitle, setWeddingTitle] = useState('');
@@ -227,14 +234,56 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess }) => {
     }
   };
 
+  const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>, target: 'groom' | 'bride') => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Reset errors
+    if (target === 'groom') setGroomFileError(null);
+    else setBrideFileError(null);
+
+    // Validate type
+    if (!ALLOWED_TYPES.includes(file.type.toLowerCase())) {
+      const err = 'Please select a valid image format (JPG, JPEG, PNG, or WEBP).';
+      if (target === 'groom') setGroomFileError(err);
+      else setBrideFileError(err);
+      return;
+    }
+
+    // Validate size
+    if (file.size > MAX_FILE_SIZE) {
+      const err = `File size (${(file.size / (1024 * 1024)).toFixed(1)}MB) exceeds 10MB limit.`;
+      if (target === 'groom') setGroomFileError(err);
+      else setBrideFileError(err);
+      return;
+    }
+
+    if (target === 'groom') setGroomUploading(true);
+    else setBrideUploading(true);
+
     const reader = new FileReader();
+    reader.onerror = () => {
+      const err = 'Failed to read image file from your device.';
+      if (target === 'groom') {
+        setGroomFileError(err);
+        setGroomUploading(false);
+      } else {
+        setBrideFileError(err);
+        setBrideUploading(false);
+      }
+    };
+
     reader.onload = async () => {
       try {
         const dataUrl = reader.result as string;
+        // Temporary instant preview
+        if (target === 'groom') setGroomPhotoUrl(dataUrl);
+        else setBridePhotoUrl(dataUrl);
+
+        // Upload to server cloud storage (/public/uploads)
         const res = await api.uploadFile(dataUrl, file.name);
         if (target === 'groom') {
           setGroomPhotoUrl(res.url);
@@ -242,10 +291,28 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess }) => {
           setBridePhotoUrl(res.url);
         }
       } catch (err: any) {
-        setError('Failed to upload profile photo: ' + err.message);
+        const message = 'Upload failed: ' + (err.message || 'Please check network connection');
+        if (target === 'groom') {
+          setGroomFileError(message);
+        } else {
+          setBrideFileError(message);
+        }
+      } finally {
+        if (target === 'groom') setGroomUploading(false);
+        else setBrideUploading(false);
       }
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleRemovePhoto = (target: 'groom' | 'bride') => {
+    if (target === 'groom') {
+      setGroomPhotoUrl('');
+      setGroomFileError(null);
+    } else {
+      setBridePhotoUrl('');
+      setBrideFileError(null);
+    }
   };
 
 
@@ -426,6 +493,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess }) => {
               )}
             </button>
 
+            <div className="pt-3 border-t border-[#E8DEC8]/60 flex flex-col items-center">
+              <span className="text-[11px] text-[#8C7E7A] mb-1.5 font-light">Default Super Admin Account:</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setIdentifier('voyaramedia');
+                  setPassword('Mayur@2107');
+                  setError(null);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FAF5EB] border border-[#D4AF37]/40 text-[#8C6D34] text-xs hover:bg-[#F5ECD7] transition cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-[#D4AF37]" />
+                <span>Fill Credentials (voyaramedia)</span>
+              </button>
+            </div>
           </form>
         )}
 
@@ -556,18 +638,75 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess }) => {
               </div>
 
               {/* Groom Photo Upload */}
-              <div className="flex items-center gap-3 pt-1">
-                <label className="flex items-center gap-1.5 py-1 px-3 rounded-lg bg-[#FAF5EB] border border-[#E8DEC8] text-[11px] text-[#8C6D34] hover:bg-[#F3EAD5] cursor-pointer">
-                  <Upload className="w-3 h-3" />
-                  <span>Upload Groom Photo</span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => handlePhotoUpload(e, 'groom')}
-                    className="hidden"
-                  />
-                </label>
-                {groomPhotoUrl && <span className="text-[10px] text-green-700">✓ Photo attached</span>}
+              <div className="pt-2 border-t border-[#E8DEC8]/50">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[11px] font-medium text-[#5C4E4B]">
+                    Groom's Portrait Photo
+                  </label>
+                  <span className="text-[10px] text-[#8C7E7A]">JPG, PNG, WEBP (Max 10MB)</span>
+                </div>
+
+                {groomFileError && (
+                  <div className="mb-2 p-2 bg-red-50 border border-red-200 rounded-xl text-[11px] text-red-700 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{groomFileError}</span>
+                  </div>
+                )}
+
+                {groomPhotoUrl ? (
+                  <div className="flex items-center gap-3 p-2.5 bg-[#FAF8F5] rounded-xl border border-[#E8DEC8]">
+                    <div className="w-12 h-12 rounded-full overflow-hidden border-2 border-[#D4AF37] shrink-0 bg-stone-200">
+                      <img src={groomPhotoUrl} alt="Groom preview" className="w-full h-full object-cover" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold text-stone-800 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Photo Uploaded</span>
+                      </p>
+                      <p className="text-[10px] text-stone-500 truncate">Saved to persistent storage</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <label className="px-2.5 py-1 text-[11px] font-medium text-[#8C6D34] bg-white border border-[#E8DEC8] hover:bg-[#FAF5EB] rounded-lg cursor-pointer flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3" />
+                        <span>Replace</span>
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,image/jpg"
+                          onChange={(e) => handlePhotoUpload(e, 'groom')}
+                          className="hidden"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePhoto('groom')}
+                        className="p-1 text-stone-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition"
+                        title="Remove photo"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <label className={`flex items-center justify-center gap-2 p-3 rounded-xl border-2 border-dashed border-[#D4AF37]/50 bg-[#FAF8F5] hover:bg-[#F5EEDD] transition cursor-pointer text-xs font-medium text-[#8C6D34] ${groomUploading ? 'opacity-50 pointer-events-none' : ''}`}>
+                    {groomUploading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-[#8C6D34]" />
+                        <span>Uploading Groom's Photo...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Camera className="w-4 h-4 text-[#D4AF37]" />
+                        <span>Choose Groom Photo from Gallery / Device</span>
+                      </>
+                    )}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/jpg"
+                      onChange={(e) => handlePhotoUpload(e, 'groom')}
+                      className="hidden"
+                    />
+                  </label>
+                )}
               </div>
             </div>
 
@@ -642,18 +781,75 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess }) => {
               </div>
 
               {/* Bride Photo Upload */}
-              <div className="flex items-center gap-3 pt-1">
-                <label className="flex items-center gap-1.5 py-1 px-3 rounded-lg bg-[#FAF5EB] border border-[#E8DEC8] text-[11px] text-[#8C6D34] hover:bg-[#F3EAD5] cursor-pointer">
-                  <Upload className="w-3 h-3" />
-                  <span>Upload Bride Photo</span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => handlePhotoUpload(e, 'bride')}
-                    className="hidden"
-                  />
-                </label>
-                {bridePhotoUrl && <span className="text-[10px] text-green-700">✓ Photo attached</span>}
+              <div className="pt-2 border-t border-[#F0C9CD]/60">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[11px] font-medium text-[#5C4E4B]">
+                    Bride's Portrait Photo
+                  </label>
+                  <span className="text-[10px] text-[#8C7E7A]">JPG, PNG, WEBP (Max 10MB)</span>
+                </div>
+
+                {brideFileError && (
+                  <div className="mb-2 p-2 bg-red-50 border border-red-200 rounded-xl text-[11px] text-red-700 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{brideFileError}</span>
+                  </div>
+                )}
+
+                {bridePhotoUrl ? (
+                  <div className="flex items-center gap-3 p-2.5 bg-[#FDF8F9] rounded-xl border border-[#F0C9CD]">
+                    <div className="w-12 h-12 rounded-full overflow-hidden border-2 border-[#A63A50] shrink-0 bg-stone-200">
+                      <img src={bridePhotoUrl} alt="Bride preview" className="w-full h-full object-cover" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold text-stone-800 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Photo Uploaded</span>
+                      </p>
+                      <p className="text-[10px] text-stone-500 truncate">Saved to persistent storage</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <label className="px-2.5 py-1 text-[11px] font-medium text-[#A63A50] bg-white border border-[#F0C9CD] hover:bg-[#FDF2F4] rounded-lg cursor-pointer flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3" />
+                        <span>Replace</span>
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,image/jpg"
+                          onChange={(e) => handlePhotoUpload(e, 'bride')}
+                          className="hidden"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePhoto('bride')}
+                        className="p-1 text-stone-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition"
+                        title="Remove photo"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <label className={`flex items-center justify-center gap-2 p-3 rounded-xl border-2 border-dashed border-[#F0C9CD] bg-[#FDF8F9] hover:bg-[#FDF2F4] transition cursor-pointer text-xs font-medium text-[#A63A50] ${brideUploading ? 'opacity-50 pointer-events-none' : ''}`}>
+                    {brideUploading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-[#A63A50]" />
+                        <span>Uploading Bride's Photo...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Camera className="w-4 h-4 text-[#A63A50]" />
+                        <span>Choose Bride Photo from Gallery / Device</span>
+                      </>
+                    )}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/jpg"
+                      onChange={(e) => handlePhotoUpload(e, 'bride')}
+                      className="hidden"
+                    />
+                  </label>
+                )}
               </div>
             </div>
 

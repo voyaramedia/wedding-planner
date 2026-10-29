@@ -12,6 +12,7 @@ import {
   Guest,
   InvitationCard,
   GalleryItem,
+  PhotoAlbum,
   CoupleRegistrationPayload,
   RegisteredWeddingSummary,
 } from '../types/index.ts';
@@ -245,6 +246,18 @@ export const api = {
       method: 'DELETE',
     }),
 
+  batchSaveGuests: (guests: Partial<Guest>[]) =>
+    request<{ success: boolean; added: number; updated: number; guests: Guest[]; stats: any }>('/api/guests/batch', {
+      method: 'POST',
+      body: JSON.stringify({ guests }),
+    }),
+
+  matchSharedGuest: (payload: { guestId1: string; guestId2: string; action: 'link' | 'unlink' }) =>
+    request<{ success: boolean; message: string; stats: any }>('/api/guests/match', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   // Invitations
   uploadInvitationCard: (data: { title: string; imageUrl: string; event: string; messageTemplate?: string }) =>
     request<InvitationCard>('/api/invitations/card', {
@@ -252,10 +265,30 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  sendInvitations: (payload: { guestIds: string[]; invitationCardId?: string; channel?: string; customMessage?: string }) =>
-    request<{ success: boolean; sentCount: number; message: string }>('/api/invitations/send', {
+  sendInvitations: (payload: { guestIds: string[]; invitationCardId?: string; channel?: string; customMessage?: string; invitationType?: string; customFunctionName?: string }) =>
+    request<{ success: boolean; sentCount: number; message: string; results?: any[] }>('/api/invitations/send', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  // Photo Albums
+  getAlbums: () => request<PhotoAlbum[]>('/api/albums'),
+
+  createAlbum: (data: { name: string; description?: string; category: string; coverImageUrl?: string; owner?: string }) =>
+    request<PhotoAlbum>('/api/albums', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  updateAlbum: (id: string, data: Partial<PhotoAlbum>) =>
+    request<PhotoAlbum>(`/api/albums/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  deleteAlbum: (id: string) =>
+    request<{ success: boolean; message: string }>(`/api/albums/${id}`, {
+      method: 'DELETE',
     }),
 
   // Gallery
@@ -263,6 +296,12 @@ export const api = {
     request<GalleryItem>('/api/gallery', {
       method: 'POST',
       body: JSON.stringify(data),
+    }),
+
+  batchUploadPhotos: (photos: Array<{ url: string; title: string; category?: string; albumId?: string; caption?: string; description?: string; owner?: string }>) =>
+    request<{ success: boolean; count: number; photos: GalleryItem[] }>('/api/gallery/batch', {
+      method: 'POST',
+      body: JSON.stringify({ photos }),
     }),
 
   updateGalleryPhoto: (id: string, data: Partial<GalleryItem>) =>
